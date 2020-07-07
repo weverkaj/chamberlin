@@ -1,0 +1,266 @@
+---
+title: 'Chamberlin CO2 Emission Analysis '
+output:
+  html_notebook: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+Introducting packages, including gasanalyzR, my own personal set of functions that I'm storing for this type of analysis. I can provide more detail in how this works if necessary.
+```{r}
+library(tidyverse)
+library(broom)
+library(gasanalyzR)
+library(colorspace)
+library(modelr)
+library(magrittr)
+```
+
+
+The data - including some preliminatry wrangling including dropping NAs, selecting only columns that we'll use. Daily highs temperatures are from PRISM.
+```{r, warning=FALSE, message=FALSE}
+CO2_measurements = read.csv("../data/csv/CO2.csv")
+  CO2_measurements$peak.heights..um.m. = as.numeric(as.character(CO2_measurements$peak.heights..um.m.))
+co2_standards_mV = read.csv("../data/csv/CO2_standards.csv") %>% select(date, std.ppm, co2mV) %>% drop_na()
+co2_standards_mmol = read.csv("../data/csv/CO2_standards.csv") %>% select(date, std.ppm, co2mmol.mol) %>% drop_na()
+buckets = read.csv("../data/csv/buckets.csv")
+dailyhighs = read.csv("../data/csv/dailyhighs.csv")
+
+```
+
+
+Create standard equations using standard.curve() from gasanalyzR
+
+```{r message=FALSE, warning=FALSE}
+# standard_equations_mV = standard.curve(co2_standards_mV, peak_field = "co2mV", std_field = "std.ppm")
+# standard_equations_mmol = standard.curve(co2_standards_mmol, peak_field = "co2mmol.mol", std_field = "std.ppm")
+
+standard_lm_mV = standard.lm(co2_standards_mV, peak_field = "co2mV", std_field = "std.ppm")
+standard_lm_mmol = standard.lm(co2_standards_mmol, peak_field = "co2mmol.mol", std_field = "std.ppm")
+```
+Wrangling daily high data
+```{r}
+high = dailyhighs %>% pivot_longer(cols = starts_with("high")) %>%
+  mutate(date = str_remove(name, "high") %>% lubridate::ymd(),
+         kelvin = (value + 273.15),
+         Plot_ID = tolower(Plot_ID),
+         Treatment = tolower(Treatment)) %>%
+  select(date, Plot_ID, Treatment, kelvin) %>%
+  rename(date.collection = date, site.id = Plot_ID, treatment.type = Treatment)
+```
+
+
+Some of our LICOR measurements are takin in mV, some in micromoles/mol. It shouldn't matter which, but we have to separate them, and calculate their ppm of CO2 independently before merging them back together. We then add in data about bucket size and temperature
+```{r}
+mV = filter(CO2_measurements, date.analysis %in% co2_standards_mV$date)
+mmol = filter(CO2_measurements, date.analysis %in% co2_standards_mmol$date)
+# 
+# 
+# mV_s = merge(mV, standard_lm_mV, by.x = "date.analysis", by.y = "date")
+# mmol_s = merge(mmol, standard_lm_mmol, by.x = "date.analysis", by.y = "date")
+# 
+# mV_s %>% add_predictions(model = .fit, var = "concentration")
+# mmol_s$concentration = (mmol_s$slope * mmol_s$peak.heights..um.m.) + mmol_s$intercept
+# 
+# all_concentrations = bind_rows(mV_s, mmol_s)
+# 
+# all_concentrations = merge(all_concentrations, buckets, by = "bucket")
+# all_concentrations$date.collection = lubridate::mdy(all_concentrations$date.collection)
+# all_concentrations$pressure..atm. = 1
+
+# all_concentrations = merge(all_concentrations, high, by = c("date.collection", "site.id", "treatment.type"))
+
+
+mV_s = merge(mV, standard_equations_mV, by.x = "date.analysis", by.y = "date")
+mmol_s = merge(mmol, standard_equations_mmol, by.x = "date.analysis", by.y = "date")
+
+mV_s$concentration = (mV_s$slope * mV_s$peak.heights..mV.) + mV_s$intercept
+mmol_s$concentration = (mmol_s$slope * mmol_s$peak.heights..um.m.) + mmol_s$intercept
+
+all_concentrations = bind_rows(mV_s, mmol_s)
+
+all_concentrations = merge(all_concentrations, buckets, by = "bucket")
+all_concentrations$date.collection = lubridate::mdy(all_concentrations$date.collection)
+all_concentrations$pressure..atm. = 1
+
+all_concentrations = merge(all_concentrations, high, by = c("date.collection", "site.id", "treatment.type"))
+
+
+```
+
+Converting ppm CO2 back to grams CO2 using the ideal gas law
+
+```{r}
+#calculate moles and grams of CO2
+all_concentrations = all_concentrations %>% mutate(moles = ((pressure..atm. * volume)/(0.082057 * kelvin)) * concentration/1000000,
+                                                   grams_co2 = moles * 44.01)
+                                                   
+
+
+```
+
+Using our timepoints, our grams CO@ measurements, and the bucket size, we can calculate the emission of CO2, in units of gCO2 * m^-2 * hr^-1
+
+```{r}
+#lay out data per bucket and summarize change
+c_data = all_concentrations %>% 
+  select(date.collection, treatment.type, site.id, bucket, Time, grams_co2, QC.Y.N.) %>% 
+  filter(QC.Y.N. != "Y") %>%
+  mutate(timepoint = round(Time/60, 0))
+
+t0 = filter(c_data, timepoint == 0)
+t1 = filter(c_data, timepoint == 1)
+t2 = filter(c_data, timepoint == 2)
+
+h = merge(t0, t1, by = c("date.collection", "treatment.type", "site.id", "bucket"), all = T)
+h = merge(h, t2, by = c("date.collection", "treatment.type", "site.id", "bucket"), all = T)
+
+c_grams_time = h %>% 
+  select(date.collection, treatment.type, site.id, bucket, Time.x, grams_co2.x, Time.y, grams_co2.y, Time, grams_co2) %>% 
+  filter(site.id != "alt") %>%
+  drop_na() %>%
+  rename(T0 = Time.x, T1 = Time.y, T2 = Time, T0co2 = grams_co2.x, T1co2 = grams_co2.y, T2co2 = grams_co2) %>%
+  mutate(change1 = ((T1co2 - T0co2)/((T1 - T0)/60))/0.06334707,
+         change2 = ((T2co2 - T1co2)/((T2 - T1)/60))/0.06334707,
+         change_mean = ((T2co2 - T0co2)/((T2 - T0)/60))/0.06334707,
+         date.collection = lubridate::ymd(date.collection),
+         changedif = change1 - change2) %>%
+  pivot_longer(cols = starts_with("change"))
+
+means = c_grams_time %>% filter(name == "change_mean")
+single = c_grams_time %>% filter(name != "change_mean") %>% filter(name != "changedif")
+difs = c_grams_time%>% filter(name == "changedif")
+
+
+```
+
+
+
+```{r}
+sums = means %>% group_by(date.collection, treatment.type, site.id) %>% summarise(mean = mean(value), n = n())
+
+minmax = c(min(sums$mean, na.rm = T), max(sums$mean, na.rm = T))
+```
+
+A quick visualization of the distribution of our mean 2-hr emission measurements
+```{r}
+ggplot(means, aes(x = value)) +
+  geom_histogram()+
+  xlab(expression("g CO"[2]*" m"^"-2" * "hr"^"-1")) +
+  ylab("Count")
+
+```
+Distribution of individual single-hour measurements
+```{r}
+ggplot(single, aes(x = value)) + 
+  geom_histogram() +
+  xlab(expression("g CO"[2]*" m"^"-2" * "hr"^"-1")) +
+  ylab("Count")
+```
+
+
+Plotting the distribution of the difference between the first hour and second hour. Values closer to zero indicate a constant rate of emission, values further from zero indicate a change in rate during the incubation.
+```{r}
+ggplot(difs, aes(x = value)) +
+  geom_histogram() +
+  xlab(expression("g CO"[2]*" m"^"-2" * "hr"^"-1")) +
+  ylab("Count")
+
+```
+
+
+
+
+All of our calculated 2-hr mean emissions data across the last year, separated by site, with treatments and control plots color-coded
+
+```{r fig.width = 12, fig.height = 8}
+
+
+ce = ggplot(means, aes(x = as.factor(date.collection), y = value, fill = treatment.type)) +
+  geom_boxplot(position = "dodge", width = 1) +
+  facet_wrap(.~site.id) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab(expression("g CO"[2]*" m"^"-2" * "hr"^"-1")) +
+  xlab("Date") +
+  scale_fill_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("No Compost", "Compost"))
+
+# ggsave("../documents/figures/CO2_boxplot_by_site_3_5_20.png", plot = ce, device = "png", width = 12, height = 8)
+ce
+```
+
+```{r}
+ggplot(means, aes(x = date.collection, y = value, fill = treatment.type, group = date.collection)) +
+  geom_boxplot(width = 2) +
+  # geom_line(aes(x = Date))
+  stat_summary(geom = "line", fun.y = mean, color = "black") +
+  # stat_summary(geom = "ribbon", fun.data = mean_cl_normal, alpha = 0.3) +
+  # facet_wrap(.~Site) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+  scale_color_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("Control", "Treatment")) 
+```
+
+Add in moisture data
+
+
+```{r}
+moisture = read.csv("../data/csv/soil_moisture.csv") %>% 
+  select(-starts_with("X")) %>% 
+  mutate(Date = lubridate::ymd(Date)) %>% 
+  drop_na(Date)
+early = moisture %>% filter(!is.na(Soil.Moisture.Loss))
+late = moisture %>% filter(is.na(Soil.Moisture.Loss))
+
+late = late %>% mutate(Wet.Soil = Tray_wet_soil_wt - Tray_wt,
+                Dry.Soil = Tray_dry_soil_wt - Tray_wt,
+                Soil.Moisture.Loss = Wet.Soil - Dry.Soil)
+
+all_moisture = bind_rows(early, late) %>%
+  mutate(pc_water = Soil.Moisture.Loss/Dry.Soil) %>%
+  filter(Site != "ALT")
+
+
+```
+
+
+
+```{r}
+means_only = means %>% 
+  select(Date = date.collection, Site = site.id, Treatment = treatment.type, Bucket.ID = bucket, mean_emission = value) %>%
+  mutate(Bucket.ID = as_factor(Bucket.ID),
+         Site = as_factor(Site),
+         Treatment = tolower(Treatment))
+
+moisture_only = all_moisture %>% select(Date, Site, Treatment, Bucket.ID, pc_water) %>% 
+  mutate(Bucket.ID = as_factor(Bucket.ID),
+         Site = as_factor(Site),
+         Treatment = tolower(Treatment))
+
+high %<>% 
+  select(Date = date.collection,
+         Site = site.id,
+         Treatment = treatment.type,
+         kelvin)
+
+means_moisture = left_join(means_only, moisture_only, by = c("Date", "Site", "Treatment", "Bucket.ID")) %>% left_join(high, by = c("Date", "Site", "Treatment"))
+  
+```
+
+
+
+
+
+
+
+```{r}
+model = lm(mean_emission ~ pc_water + Site + kelvin + Treatment + pc_water*kelvin, means_moisture)
+
+ggplot(means_moisture, aes(x = pc_water, y = mean_emission)) + 
+  geom_point() +
+  facet_wrap(.~Site)
+```
+
+
+

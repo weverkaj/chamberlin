@@ -1,0 +1,110 @@
+---
+title: "Soil Moisture"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(broom)
+library(gasanalyzR)
+library(colorspace)
+library(modelr)
+library(calecopal)
+library(Hmisc)
+```
+
+
+```{r}
+moisture = read.csv("../data/csv/soil_moisture.csv") %>% 
+  select(-starts_with("X")) %>% 
+  mutate(Date = lubridate::ymd(Date)) %>% 
+  drop_na(Date)
+early = moisture %>% filter(!is.na(Soil.Moisture.Loss))
+late = moisture %>% filter(is.na(Soil.Moisture.Loss))
+
+late = late %>% mutate(Wet.Soil = Tray_wet_soil_wt - Tray_wt,
+                Dry.Soil = Tray_dry_soil_wt - Tray_wt,
+                Soil.Moisture.Loss = Wet.Soil - Dry.Soil)
+
+all_moisture = bind_rows(early, late) %>%
+  mutate(pc_water = Soil.Moisture.Loss/Dry.Soil) %>%
+  filter(Site != "ALT")
+
+# write.csv(all_moisture, file = "soil_moisture_total.csv")
+
+```
+
+
+
+
+```{r}
+sums = all_moisture %>% group_by(Date, Treatment, Site) %>% summarise(mean = mean(pc_water), n = n())
+
+minmax = c(min(sums$mean, na.rm = T), max(sums$mean, na.rm = T))
+```
+
+
+
+```{r }
+ggplot(all_moisture, aes(x = Date, y = pc_water)) +
+  stat_summary(aes(y = pc_water,group=1), fun.y=mean, geom="line",group=1) +
+  # facet_wrap(.~Site) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_fill_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("Control", "Treatment")) 
+  # scale_x_date(date_labels = "%m")
+
+```
+
+```{r }
+ggplot(all_moisture, aes(x = as.factor(Date), y = pc_water, fill = Treatment)) +
+  geom_boxplot(position = "dodge", width = .5) +
+  stat_summary(aes(y = pc_water,group=1), fun.y=mean, geom="line",group=1, width = 10) +
+  # facet_wrap(.~Site) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_fill_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("Control", "Treatment")) 
+  
+```
+
+
+```{r }
+# ggplot(all_moisture, aes(x = Date, y = pc_water)) +
+#   geom_boxplot(width = 5) +
+#   # geom_line(aes(x = Date))
+#   # stat_summary(aes(y = pc_water,group=1), fun.y=mean, geom="line",group=1) +
+#   # facet_wrap(.~Site) +
+#   theme_bw() +
+#   theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+#   scale_fill_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("Control", "Treatment")) 
+  
+mp = ggplot(all_moisture, aes(x = Date, y = pc_water)) +
+  # geom_col(position = "dodge", width = 5) +
+  # geom_boxplot(width = 2) +
+  # geom_line(aes(x = Date))
+  stat_summary(geom = "smooth", fun.y = mean, color = "black") +
+  stat_summary(geom = "errorbar", fun.data = mean_cl_normal) +
+  # facet_wrap(.~Site) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  # scale_color_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("Control", "Treatment")) +
+  ylab(expression("g H"[2]*"O g"^"-1" * " Dry Soil"))
+
+ggsave("../documents/figures/soil_moisture_3_5_20.png", plot = mp, device = "png")
+mp
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

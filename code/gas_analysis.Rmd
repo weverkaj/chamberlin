@@ -1,0 +1,138 @@
+---
+title: "Chamberlin Gas Analysis Pipeline"
+output: html_notebook
+---
+```{r}
+library(tidyverse)
+library(broom)
+library(gasanalyzR)
+```
+
+
+```{r}
+CO2_measurements = read.csv("../data/csv/CO2.csv")
+  CO2_measurements$peak.heights..um.m. = as.numeric(as.character(CO2_measurements$peak.heights..um.m.))
+co2_standards_mV = read.csv("../data/csv/CO2_standards.csv") %>% select(date, std.ppm, co2mV) %>% drop_na()
+co2_standards_mmol = read.csv("../data/csv/CO2_standards.csv") %>% select(date, std.ppm, co2mmol.mol) %>% drop_na()
+buckets = read.csv("../data/csv/buckets.csv")
+dailyhighs = read.csv("../data/csv/dailyhighs.csv")
+
+```
+
+
+
+
+```{r}
+standard_equations_mV = standard.curve(co2_standards_mV, peak_field = "co2mV", std_field = "std.ppm")
+standard_equations_mmol = standard.curve(co2_standards_mmol, peak_field = "co2mmol.mol", std_field = "std.ppm")
+```
+
+```{r}
+high = dailyhighs %>% pivot_longer(cols = starts_with("high")) %>%
+  mutate(date = str_remove(name, "high") %>% lubridate::ymd(),
+         kelvin = (value + 273.15),
+         Plot_ID = tolower(Plot_ID),
+         Treatment = tolower(Treatment)) %>%
+  select(date, Plot_ID, Treatment, kelvin) %>%
+  rename(date.collection = date, site.id = Plot_ID, treatment.type = Treatment)
+```
+
+
+
+```{r}
+mV = filter(CO2_measurements, date.analysis %in% co2_standards_mV$date)
+mmol = filter(CO2_measurements, date.analysis %in% co2_standards_mmol$date)
+
+
+mV_s = merge(mV, standard_equations_mV, by.x = "date.analysis", by.y = "date")
+mmol_s = merge(mmol, standard_equations_mmol, by.x = "date.analysis", by.y = "date")
+
+mV_s$concentration = (mV_s$slope * mV_s$peak.heights..mV.) + mV_s$intercept
+mmol_s$concentration = (mmol_s$slope * mmol_s$peak.heights..um.m.) + mmol_s$intercept
+
+all_concentrations = bind_rows(mV_s, mmol_s)
+
+all_concentrations = merge(all_concentrations, buckets, by = "bucket")
+all_concentrations$date.collection = lubridate::mdy(all_concentrations$date.collection)
+all_concentrations$pressure..atm. = 1
+
+all_concentrations = merge(all_concentrations, high, by = c("date.collection", "site.id", "treatment.type"))
+
+
+```
+
+
+```{r}
+#calculate moles and grams of CO2
+all_concentrations = all_concentrations %>% mutate(moles = ((pressure..atm. * volume)/(0.082057 * kelvin)) * concentration/1000000,
+                                                   grams_co2 = moles * 44.01)
+                                                   
+
+# all_concentrations$moles = ( (all_concentrations$pressure..atm. * all_concentrations$volume) / (0.082057 * all_concentrations$kelvin) ) * all_concentrations$concentration/1000000
+# all_concentrations$grams_co2 = (all_concentrations$moles * 44.01)
+```
+
+
+```{r}
+#lay out data per bucket and summarize change
+c_data = all_concentrations %>% 
+  select(date.collection, treatment.type, site.id, bucket, Time, grams_co2, QC.Y.N.) %>% 
+  filter(QC.Y.N. != "Y") %>%
+  mutate(timepoint = round(Time/60, 0))
+
+t0 = filter(c_data, timepoint == 0)
+t1 = filter(c_data, timepoint == 1)
+t2 = filter(c_data, timepoint == 2)
+
+h = merge(t0, t1, by = c("date.collection", "treatment.type", "site.id", "bucket"), all = T)
+h = merge(h, t2, by = c("date.collection", "treatment.type", "site.id", "bucket"), all = T)
+
+c_grams_time = h %>% 
+  select(date.collection, treatment.type, site.id, bucket, Time.x, grams_co2.x, Time.y, grams_co2.y, Time, grams_co2) %>% 
+  filter(site.id != "alt") %>%
+  drop_na() %>%
+  rename(T0 = Time.x, T1 = Time.y, T2 = Time, T0co2 = grams_co2.x, T1co2 = grams_co2.y, T2co2 = grams_co2) %>%
+  mutate(change1 = ((T1co2 - T0co2)/((T1 - T0)/60))/0.06334707,
+         change2 = ((T2co2 - T1co2)/((T2 - T1)/60))/0.06334707,
+         change_mean = ((T2co2 - T0co2)/((T2 - T0)/60))/0.06334707,
+         date.collection = lubridate::ymd(date.collection)) %>%
+  pivot_longer(cols = starts_with("change"))
+
+
+```
+
+
+
+```{r}
+means = c_grams_time %>% filter(name == "change_mean")
+single = c_grams_time %>% filter(name != "change_mean")
+
+ggplot(means, aes(x = as.factor(date.collection), y = value, fill = treatment.type)) +
+  geom_boxplot() +
+  facet_wrap(.~site.id) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+
+```{r}
+ggplot(means, aes(x = value)) +
+  geom_histogram()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

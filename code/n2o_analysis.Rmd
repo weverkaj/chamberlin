@@ -1,0 +1,210 @@
+---
+title: "Chamberlin N2O Analysis"
+output: html_notebook
+---
+
+Introducting packages, including gasanalyzR, my own personal set of functions that I'm storing for this type of analysis
+```{r}
+library(tidyverse)
+library(broom)
+library(gasanalyzR)
+library(calecopal)
+```
+
+
+The data - including some preliminatry wrangling including dropping NAs, selecting only columns that we'll use. Daily highs temperatures are from PRISM. Top rows of the data are shown.
+```{r}
+
+n2O_measurements = read.csv("../data/csv/N2O.csv") %>% 
+  mutate(date.analysis = lubridate::ymd(date.analysis),
+         date.collection = lubridate::ymd(date.collection)) %>% drop_na(date.analysis)
+n2o_standards = read.csv("../data/csv/N2O_standards.csv") %>% select(date, std.ppm, area) %>%
+  drop_na() %>%
+  mutate(date = lubridate::mdy(date))
+
+buckets = read.csv("../data/csv/buckets.csv")
+dailyhighs = read.csv("../data/csv/dailyhighs.csv")
+
+
+head((n2O_measurements))
+head(n2o_standards)
+
+```
+
+
+
+
+Create standard equations using standard.curve() from gasanalyzR
+```{r, message=FALSE, warning=FALSE}
+standard_equations = standard.curve(n2o_standards, std_field = "std.ppm", peak_field = "area")
+head(standard_equations)
+```
+
+
+
+
+
+
+
+Wrangling daily high data
+
+```{r}
+high = dailyhighs %>% pivot_longer(cols = starts_with("high")) %>%
+  mutate(date = str_remove(name, "high") %>% lubridate::ymd(),
+         kelvin = (value + 273.15),
+         Plot_ID = tolower(Plot_ID),
+         Treatment = tolower(Treatment)) %>%
+  select(date, Plot_ID, Treatment, kelvin) %>%
+  rename(date.collection = date, site.id = Plot_ID, treatment.type = Treatment)
+
+head(high)
+```
+
+Calculate  ppm of N20 . We then add in data about bucket size and temperature
+
+```{r}
+
+a_s = merge(n2O_measurements, standard_equations, by.x = "date.analysis", by.y = "date") %>% 
+  mutate(concentration_ppm = (slope * area) + intercept)
+
+a_s = merge(a_s, buckets, by = "bucket")
+
+
+
+a_s$pressure..atm. = 1
+
+a_s = merge(a_s, high, by = c("date.collection", "site.id", "treatment.type"), all.x = TRUE)
+
+```
+
+Converting ppm N20 back to grams N20 using the ideal gas law
+```{r}
+all_concentrations = a_s %>% mutate(moles = ((pressure..atm. * volume)/(0.082057 * kelvin)) * concentration_ppm/1000000,
+                                                   grams_n2o = moles * 44.013)
+
+
+```
+
+Using our timepoints, our grams N2O measurements, and the bucket size, we can calculate the emission of N2O, in units of gN2O * m^-2 * hr^-1
+```{r}
+n_data = all_concentrations %>% 
+  select(date.collection, treatment.type, site.id, bucket, Time, grams_n2o, QC...Y.N.) %>% 
+  filter(QC...Y.N. != "Y") %>%
+  mutate(timepoint = round(Time/60, 0))
+
+
+t0 = filter(n_data, timepoint == 0)
+t1 = filter(n_data, timepoint == 1)
+t2 = filter(n_data, timepoint == 2)
+
+h = merge(t0, t1, by = c("date.collection", "treatment.type", "site.id", "bucket"), all = T)
+h = merge(h, t2, by = c("date.collection", "treatment.type", "site.id", "bucket"), all = T)
+
+
+
+n_grams_time = h %>% 
+  select(date.collection, treatment.type, site.id, bucket, Time.x, grams_n2o.x, Time.y, grams_n2o.y, Time, grams_n2o) %>% 
+  filter(site.id != "alt") %>%
+  drop_na() %>%
+  rename(T0 = Time.x, T1 = Time.y, T2 = Time, T0n2o = grams_n2o.x, T1n2o = grams_n2o.y, T2n2o = grams_n2o) %>%
+  mutate(change1 = ((T1n2o - T0n2o)/((T1 - T0)/60))/0.06334707,
+         change2 = ((T2n2o - T1n2o)/((T2 - T1)/60))/0.06334707,
+         change_mean = ((T2n2o - T0n2o)/((T2 - T0)/60))/0.06334707,
+         changedif = change1 - change2) %>%
+  pivot_longer(cols = starts_with("change"))
+
+
+```
+
+Seperating mean 2-hr measurements, single hour measurements, and difference between measurements from each hour
+
+```{r}
+means = n_grams_time %>% filter(name == "change_mean")
+single = n_grams_time %>% filter(name != "change_mean") %>% filter(name != "changedif")
+difs = n_grams_time%>% filter(name == "changedif")
+```
+
+```{r}
+sums = means %>% group_by(date.collection, treatment.type, site.id) %>% summarise(mean = mean(value), n = n())
+
+minmax = c(min(sums$mean, na.rm = T), max(sums$mean, na.rm = T))
+```
+
+A quick visualization of the distribution of our mean 2-hr emission measurements
+```{r}
+ggplot(means, aes(x = value)) + 
+  geom_histogram() +
+  xlab(expression("g N"[2]*"O m"^"-2" * "hr"^"-1")) +
+  ylab("Count")
+  
+```
+
+```{r}
+# dif_from_zero = means %>%
+#   drop_na(value) %>%
+#   select(date.collection, site.id, treatment.type, value) %>%
+#   group_by(date.collection, site.id, treatment.type) %>%
+#   filter(n() >= 2) %>%
+#   nest() %>%
+  # map(data, ~t.test(data, mu = 0))
+  # nest() #%>%
+  # mutate(fit = map(data, ~t.test(.[["value"]], data = .)$p.value))
+    #        results = map(fit, glance), results2 = map(fit, tidy)) %>%
+    # unnest(results) %>%
+    # select(-p.value, -statistic) %>%
+    # unnest(results2) %>%
+    # select(date, r.squared, term, estimate, std.error, p.value)
+
+   #%>%
+  # mutate(
+  #   t_test = map2(A, B, ~{t.test(.x$value, .y$value) %>% tidy()}),
+  #   A = map(A, nrow),
+  #   B = map(B, nrow)
+  # ) %>%
+  # unnest()
+
+
+```
+
+
+Distribution of individual single-hour measurements
+```{r}
+ggplot(single, aes(x = value)) + 
+  geom_histogram() +
+  xlab(expression("g N"[2]*"O m"^"-2" * "hr"^"-1")) +
+  ylab("Count")
+```
+
+
+Plotting the distribution of the difference between the first hour and second hour. Values closer to zero indicate a constant rate of emission, values further from zero indicate a change in rate during the incubation.
+```{r}
+ggplot(difs, aes(x = value)) + 
+  geom_histogram() +
+  xlab(expression("Difference g N"[2]*"O m"^"-2" * "hr"^"-1")) +
+  ylab("Count")
+```
+
+Calculated 2-hr mean emissions data from each date across the last year, separated by site, with treatments and control plots color-coded
+```{r fig.width = 12, fig.height = 8}
+
+
+ne = ggplot(means, aes(x = as.factor(date.collection), y = value, fill = treatment.type)) +
+  geom_boxplot(position = "dodge", width = 1) +
+  facet_wrap(.~site.id) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ylab(expression("g N"[2]*"O m"^"-2" * "hr"^"-1")) +
+  ylim(-4e-5, 4e-5) +
+  xlab("Date") +
+  scale_fill_manual(name = "Treatment", values = cal_palette(name = "sierra2", n = 2, type = "discrete"), labels = c("No Compost", "Compost"))
+
+
+# ggsave("../documents/figures/N2O_boxplot_by_site_3_5_20.png", plot = ne, device = "png", width = 12, height = 8)
+ne
+
+```
+
+
+
+
+

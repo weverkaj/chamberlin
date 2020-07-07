@@ -1,0 +1,67 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Data Cleaning
+
+
+This is where I clean the data
+```{r}
+library(tidyverse)
+
+co2_standard = read.csv("G:/My Drive/UCSB/Research/Chamberlin/data/csv/CO2_standards.csv") %>% 
+  select(date, std.ppm, co2mV, co2mmol.mol)
+
+standard_mv = co2_standard %>%
+  filter(is.na(co2mmol.mol)) %>%
+  select(-co2mmol.mol) %>%
+  drop_na()
+  
+
+standard_mmol = co2_standard %>%
+  filter(is.na(co2mV)) %>%
+  select(-co2mV) %>%
+  drop_na()
+
+```
+
+
+```{r}
+
+#install.packages(lubridate)
+x = standard_mv %>%
+  mutate(date = lubridate::mdy(date)) %>%
+  nest(-date) %>%
+  mutate(fit = map(data, ~lm(std.ppm ~ co2mV, data = .)),
+         results = map(fit, generics::tidy)) %>%
+  unnest(results)
+
+CO2_measurements = read.csv("../data/csv/CO2.csv")
+```
+
+
+
+join()
+left_join()
+right_join()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

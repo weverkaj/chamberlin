@@ -1,0 +1,33 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+
+ 
+```
+
+
+```{r}
+dailyhighs = read.csv("../data/csv/dailyhighs.csv") %>% pivot_longer(cols = starts_with("high"))
+
+
+##
+str_remove()
+
+
+```
+
+str_remove()
+lubridate::ymd
+
+
+
+
+
+
+
+
